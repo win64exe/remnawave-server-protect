@@ -1,208 +1,611 @@
-# rkn_protect.sh
+# Remnawave Server Protect
 
-Скрипт защиты Linux-сервера от блокировок РКН/ТСПУ/DPI.  
-Совместим с **Remnawave + VLESS + XTLS-Reality**.
+Безопасная базовая настройка Linux-сервера для **Remnawave Panel / Remnawave Node / Xray-core**.
 
-## Установка
+Скрипт предназначен для серверов, на которых работает Remnawave Node или Panel, и выполняет системную настройку TCP/IP, локального зашифрованного DNS, nftables, Fail2ban и лимитов файловых дескрипторов.
+
+Основная цель — получить стабильную конфигурацию сервера для Remnawave без вмешательства в конфигурацию Xray, Docker-сети и настройки Node.
+
+> **Важно:** скрипт не является гарантией обхода блокировок или DPI. Он выполняет системное hardening и переводит DNS с обычного UDP/53 на локальный DNS-over-HTTPS.
+
+## Поддерживаемая конфигурация
+
+Целевая конфигурация:
+
+* Remnawave Panel: `3.4.x`
+* Remnawave Node: `3.4.1`
+* Xray-core: `26.7.28`
+* Docker Engine + Docker Compose
+* Ubuntu 22.04 / 24.04
+* Debian 12
+* архитектуры `amd64`, `arm64`, `armhf` для cloudflared
+
+Remnawave Node представляет собой отдельный контейнер, внутри которого работает Xray-core. Panel и Node являются раздельными компонентами Remnawave.
+
+Xray-core `26.7.28` доступен в официальном репозитории XTLS/Xray-core.
+
+---
+
+# Возможности
+
+## 1. TCP/IP hardening
+
+Скрипт создаёт:
+
+```text
+/etc/sysctl.d/99-remnawave-server.conf
+```
+
+Настраиваются:
+
+* IPv4 forwarding;
+* IPv6 forwarding;
+* TCP timestamps;
+* TCP SACK;
+* TCP window scaling;
+* TCP MTU probing;
+* TCP SYN cookies;
+* TCP connection queues;
+* TCP buffers;
+* `tcp_tw_reuse`;
+* `tcp_rfc1337`;
+* уменьшение TCP FIN timeout;
+* отключение ICMP redirects;
+* отключение source routing;
+* базовое ICMP hardening.
+
+При этом настройки подобраны таким образом, чтобы не вмешиваться в работу Docker и Remnawave Node.
+
+### BBR
+
+Скрипт не навязывает конкретный congestion control.
+
+Если сервер уже использует BBR, текущая конфигурация не отключает необходимые TCP timestamps.
+
+Проверить congestion control:
 
 ```bash
-curl -o rkn_protect.sh 'https://raw.githubusercontent.com/win64exe/rkn_protect/main/rkn_protect.sh
-chmod +x rkn_protect.sh
-sudo ./rkn_protect.sh
+sysctl net.ipv4.tcp_congestion_control
 ```
 
 ---
 
-## Модули
+# 2. DNS-over-HTTPS
 
-### 1. sysctl hardening
+Это одна из главных особенностей скрипта.
 
-Настраивает параметры ядра Linux для защиты сетевого стека.
+Вместо прямого использования:
 
-**Защита от RST-инъекций РКН** — один из основных методов блокировки РКН это отправка поддельных TCP RST пакетов чтобы оборвать соединение. Параметр `tcp_rfc1337=1` защищает от этой атаки на уровне ядра — безопасная альтернатива RST drop в nftables который несовместим с Remnawave.
+```text
+8.8.8.8:53
+1.1.1.1:53
+```
 
-**Совместимость с BBR** — `tcp_timestamps=1` оставлен включённым намеренно. Remnawave при установке включает алгоритм BBR для оптимизации TCP, и BBR использует timestamps для измерения RTT. Отключение timestamps деградирует производительность BBR.
+создаётся локальный DNS-over-HTTPS proxy.
 
-**Оптимизация для Xray** — `somaxconn=32768` и `tcp_max_syn_backlog=32768` увеличивают очередь входящих соединений. Xray при большом числе клиентов VLESS открывает много параллельных соединений, дефолтные значения могут стать узким местом.
+Архитектура:
 
-**ip_forward=1** — обязателен для Docker. Без него контейнеры не могут маршрутизировать трафик между собой и наружу.
+```text
+                 Linux / Docker / applications
+                            │
+                            ▼
+                    systemd-resolved
+                            │
+                            ▼
+                     127.0.0.1:5053
+                            │
+                            ▼
+                       cloudflared
+                            │
+                    HTTPS / TCP 443
+                       ┌────┴────┐
+                       ▼         ▼
+                  Cloudflare   Quad9
+                     DoH         DoH
+```
 
----
+`cloudflared` работает только на:
 
-### 2. nftables — TTL + ICMP + ping фильтрация
+```text
+127.0.0.1:5053
+```
 
-Настраивает правила пакетной фильтрации. **Скрипт идемпотентен: при повторном запуске, если правила уже применены, модуль пропускает настройку, предотвращая разрыв соединений.**
+и не открывает DNS-сервис наружу.
 
-**TTL=128** — устанавливает фиксированное значение TTL для всех исходящих пакетов. ТСПУ анализирует TTL чтобы определить операционную систему и количество хопов до клиента. TTL=128 соответствует Windows и затрудняет идентификацию сервера. Применяется в цепочке `postrouting` — затрагивает весь трафик включая пакеты из Docker-контейнеров.
+Upstream:
 
-**Блокировка ping** — `icmp type echo-request drop` делает сервер невидимым для сканеров которые используют ping для обнаружения активных хостов (Shodan, masscan и другие).
+```text
+https://cloudflare-dns.com/dns-query
+https://dns.quad9.net/dns-query
+```
 
-**ICMP timestamp** — блокировка `timestamp-request` предотвращает утечку uptime сервера и усложняет OS fingerprinting через ICMP.
+Таким образом, сервер не отправляет DNS-запросы к публичным DNS-серверам в открытом UDP/53.
 
-**MLD блокировка** — типы ICMPv6 139 и 140 могут раскрыть топологию сети. На VPS без IPv6 multicast они не нужны.
+### Почему это важно
 
-**SYN rate limit** — ограничение 200 новых соединений в секунду защищает от SYN-флуда. Лимит выбран с запасом для параллельных подключений VLESS-клиентов.
+Обычный DNS:
 
----
+```text
+Client
+  │
+  └──── UDP/53 ────> 8.8.8.8
+```
 
-### 3. Лимиты файловых дескрипторов для Xray
+не шифруется.
 
-Xray-core обрабатывает каждое VLESS-соединение через файловый дескриптор. Дефолтный лимит Linux — 1024, что критически мало при нагрузке в несколько сотен клиентов.
+Новая схема:
 
-Скрипт устанавливает лимит **1 048 576** на трёх уровнях:
-- `/etc/security/limits.d/99-xray.conf` — для системных пользователей
-- `/etc/systemd/system/docker.service.d/limits.conf` — для Docker daemon
-- Docker перезапускается для применения, контейнеры Remnawave и бота поднимаются автоматически
+```text
+Client
+  │
+  └──── HTTPS/443 ────> DoH resolver
+```
 
-После перезапуска Docker скрипт ждёт пока он полностью поднимется прежде чем переходить к следующему модулю.
+DNS-запрос находится внутри HTTPS-соединения.
 
----
+### Важный момент
 
-### 4. DNS-over-TLS
+Скрипт **не считает 8.8.8.8 и 1.1.1.1 недоступными всегда**.
 
-DNS-спуфинг — самый массовый метод блокировок РКН. Провайдер подменяет DNS-ответы и перенаправляет на страницу блокировки. Шифрование DNS-запросов полностью исключает этот метод.
+Он только перестаёт зависеть от их обычного UDP/53.
 
-**Автоопределение метода** — скрипт проверяет наличие `systemd-resolved` и выбирает подходящий способ:
+При этом меню содержит диагностический тест:
 
-- **systemd-resolved** (Ubuntu, Debian с resolved) — настраивает DoT через `resolved.conf.d`. Перед перезапуском сохраняет резервный `resolv.conf`. После перезапуска ждёт до 20 секунд проверяя доступность DNS. Если resolved не поднялся — восстанавливает резервный конфиг.
+```text
+Plain UDP/53:
 
-- **stubby** (Debian без resolved) — устанавливает и настраивает stubby как локальный DoT-резолвер на `127.0.0.1:53`. Переключает `/etc/resolv.conf` на `127.0.0.1` и защищает файл от перезаписи DHCP-клиентом **через конфигурацию NetworkManager или хуки dhclient (безопасная альтернатива `chattr +i`)**. Ждёт до 15 секунд пока stubby установит TLS-соединение с upstream.
+8.8.8.8:53
+1.1.1.1:53
 
-**Upstream серверы** — Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`, `149.112.112.112`), Yandex (`77.88.8.8`, `77.88.8.1`) с round-robin балансировкой.
+Local encrypted resolver:
 
-**Совместимость с Remnawave** — Docker использует встроенный резолвер `127.0.0.11`, не зависящий от системного DNS. Xray использует свой DNS из конфига. Изменения затрагивают только системные DNS-запросы хоста.
+127.0.0.1:5053
+```
 
----
-
-### 5. Fail2ban — защита от SSH брутфорса
-
-Анализирует логи аутентификации и автоматически блокирует IP-адреса которые пытаются подобрать пароль SSH.
-
-**Параметры:**
-- 5 неудачных попыток за 10 минут → бан на 1 час
-- Игнорирует localhost и приватные подсети (10.x, 172.16.x, 192.168.x)
-
-**Recidive jail** — если IP получил бан 3 или более раз за сутки — блокируется на 24 часа. Отсекает упорные ботнеты которые возвращаются после окончания обычного бана.
-
-**Автоопределение SSH порта** — читает текущий порт из `sshd_config` и настраивает jail точно под него. Работает корректно после смены порта модулем 9.
-
-**Автоопределение бэкенда** — на системах с journald использует `systemd` бэкенд для логов. Для блокировок (banaction) **автоматически интегрируется с nftables**, если он активен, исключая конфликты фаерволов.
-
----
-
-### 6. SSH hardening
-
-Закрывает уязвимости в конфигурации SSH которые обнаруживает Lynis. Перед изменением создаётся бэкап `sshd_config` с временной меткой. Если новый конфиг содержит ошибки — изменения откатываются автоматически.
-
-| Параметр | Значение | Причина |
-|----------|----------|---------|
-| `MaxAuthTries` | `3` | Максимум 3 попытки ввода пароля |
-| `MaxSessions` | `3` | Ограничение одновременных сессий |
-| `X11Forwarding` | `no` | Отключение GUI forwarding |
-| `AllowTcpForwarding` | `no` | Запрет использования SSH как туннеля |
-| `AllowAgentForwarding` | `no` | Запрет проброса SSH-агента |
-| `Compression` | `no` | Сжатие имеет историю CVE |
-| `LoginGraceTime` | `30` | 30 секунд на аутентификацию |
-| `ClientAliveCountMax` | `2` | Отключение зависших сессий |
-| `LogLevel` | `VERBOSE` | Детальные логи для Fail2ban |
-| `PermitEmptyPasswords` | `no` | Запрет входа без пароля |
-| `IgnoreRhosts` | `yes` | Отключение устаревшего механизма доверия |
-
----
-
-### 7. Отключение неиспользуемых сетевых протоколов
-
-На типичном VPS-сервере не используются протоколы dccp, sctp, rds и tipc. Загруженные но неиспользуемые модули ядра расширяют поверхность атаки.
-
-| Протокол | Описание |
-|----------|----------|
-| `dccp` | Datagram Congestion Control Protocol |
-| `sctp` | Stream Control Transmission Protocol |
-| `rds` | Reliable Datagram Sockets (Oracle) |
-| `tipc` | Transparent Inter-Process Communication |
-
-Создаёт `/etc/modprobe.d/unused-protocols.conf` с директивой `install X /bin/false`. Если модули загружены — выгружает немедленно. Обновляет initramfs чтобы изменения сохранились после перезагрузки.
-
-**Совместимость** — Docker, Remnawave и Xray используют только TCP и UDP. Отключение этих протоколов на них не влияет.
+Это позволяет определить, проходит ли обычный DNS с конкретного сервера.
 
 ---
 
-### 8. Смена порта SSH
+# 3. Не изменяет DNS внутри Xray
 
-Перенос SSH на нестандартный порт защищает от автоматических сканеров которые проверяют только стандартный порт 22.
+Скрипт не редактирует:
 
-**Порядок операций:**
-1. Генерирует случайный порт в диапазоне 49152–65535 (IANA private range)
-2. Проверяет что порт не занят через `ss`
-3. **Временно открывает порт и проверяет его доступность извне (защита от глухих фаерволов хостера)**
-4. **Сначала открывает новый порт в UFW** — текущая сессия остаётся активной
-5. Проверяет новый конфиг через `sshd -t`
-6. Если ошибка — откатывает изменения и удаляет правило UFW
-7. Перезапускает sshd
-8. Закрывает старый порт 22 в UFW
-9. Выводит новый порт и готовую команду подключения
+```text
+Xray config
+inbounds
+outbounds
+routing
+dns
+realitySettings
+xhttpSettings
+```
 
-> ⚠️ Не закрывайте текущую сессию до проверки подключения на новом порту в отдельном терминале.
+Это сделано намеренно.
 
----
-
-## Совместимость с Remnawave
-
-Скрипт специально адаптирован под стек Remnawave + VLESS + XTLS-Reality:
-
-- RST drop **убран** из nftables — обрывал соединения между панелью и нодами
-- `tcp_timestamps=1` — BBR работает корректно
-- Docker-сети не затрагиваются модулем DoT
-- После перезапуска Docker контейнеры поднимаются автоматически
-
-| ОС | Статус |
-|----|--------|
-| Debian 12 (bookworm) | ✓ Протестировано |
-| Debian 13 (trixie) | ✓ Совместимо |
-| Ubuntu 22.04 (jammy) | ✓ Совместимо |
-| Ubuntu 24.04 (noble) | ✓ Совместимо |
+Remnawave управляет конфигурацией Node и передаёт конфигурацию Xray через Panel. Поэтому системный hardening не должен перезаписывать конфигурацию Xray.
 
 ---
 
-## Проверка после установки
+# 4. Docker compatibility
+
+Скрипт не изменяет:
+
+* Docker bridge;
+* Docker NAT;
+* Docker Compose Remnawave;
+* `network_mode`;
+* порты Node;
+* конфигурацию `remnanode`;
+* Xray configuration.
+
+Это особенно важно для Remnawave Node.
+
+Официальная документация Remnawave показывает Node как отдельный контейнер Docker, обычно использующий `network_mode: host`.
+
+---
+
+# 5. File descriptor limits
+
+Для серверов с большим количеством одновременных соединений устанавливается:
+
+```text
+nofile = 1048576
+```
+
+Создаются:
+
+```text
+/etc/security/limits.d/99-remnawave.conf
+/etc/systemd/system/docker.service.d/limits.conf
+```
+
+Это увеличивает доступное количество файловых дескрипторов для Docker/systemd.
+
+Docker автоматически не перезапускается.
+
+После изменения конфигурации администратор может самостоятельно выполнить:
 
 ```bash
-# nftables правила (без дублей)
-nft list table inet rkn_protect
+systemctl restart docker
+```
 
-# DNS работает через stubby/resolved (любая из команд)
-dig google.com @127.0.0.1 | grep SERVER
-nslookup google.com 127.0.0.1
+Это сделано специально, чтобы скрипт неожиданно не отключал работающий Remnawave Node.
 
-# Fail2ban активен
+---
+
+# 6. nftables
+
+Создаётся отдельная таблица:
+
+```text
+inet remnawave_protect
+```
+
+Файл:
+
+```text
+/etc/nftables.d/remnawave-protect.nft
+```
+
+В неё добавляются только базовые ICMP-фильтры.
+
+Скрипт намеренно **не устанавливает**:
+
+```text
+TTL spoofing
+SYN rate limit
+RST drop
+Docker forwarding restrictions
+```
+
+## Почему нет TTL=128
+
+Принудительная установка:
+
+```text
+TTL = 128
+```
+
+для всего исходящего трафика может менять сетевое поведение и не является универсальным способом защиты от DPI.
+
+Поэтому TTL normalization оставлен за пределами базовой конфигурации.
+
+## Почему нет SYN-limit
+
+В старом варианте использовалось:
+
+```text
+200 SYN/sec
+```
+
+Для публичного Node это слишком произвольное значение.
+
+При большом количестве пользователей такое ограничение может привести к отбрасыванию легитимных подключений.
+
+Поэтому SYN rate-limit отключён.
+
+---
+
+# 7. Fail2ban
+
+Устанавливается Fail2ban и создаётся jail для SSH:
+
+```text
+/etc/fail2ban/jail.d/remnawave-sshd.local
+```
+
+Стандартные параметры:
+
+```text
+5 попыток
+10 минут
+бан 1 час
+```
+
+Fail2ban используется только для защиты SSH.
+
+Проверка:
+
+```bash
 fail2ban-client status sshd
-
-# SSH порт
-grep "^Port" /etc/ssh/sshd_config
-
-# Протоколы отключены
-lsmod | grep -E "^(dccp|sctp|rds|tipc)" || echo "Чисто"
-
-# Лимиты fd в контейнере
-docker exec remnawave-nginx cat /proc/1/limits | grep "open files"
-
-# Lynis итоговый аудит
-lynis audit system 2>/dev/null | grep "Hardening index"
 ```
 
-## Полезные команды Fail2ban
+Разбан IP:
 
 ```bash
-# Кто забанен прямо сейчас
-fail2ban-client status sshd
-
-# Разбанить конкретный IP
-fail2ban-client set sshd unbanip 1.2.3.4
-
-# Живой лог банов
-tail -f /var/log/fail2ban.log
+fail2ban-client set sshd unbanip IP_ADDRESS
 ```
 
-## Лицензия
+---
 
-MIT
+# 8. Backup
+
+Перед изменением конфигурации создаётся backup:
+
+```text
+/root/remnawave-protect-backups/YYYYMMDD-HHMMSS/
+```
+
+Сохраняются, если существуют:
+
+```text
+/etc/sysctl.d/99-remnawave-server.conf
+/etc/systemd/resolved.conf.d/remnawave-doh.conf
+/etc/resolv.conf
+/etc/nftables.conf
+/etc/nftables.d/remnawave-protect.nft
+/etc/docker/daemon.json
+/etc/security/limits.d/99-remnawave.conf
+/etc/systemd/system/docker.service.d/limits.conf
+/etc/systemd/system/remnawave-server-protect.service
+/etc/fail2ban/jail.d/remnawave-sshd.local
+```
+
+Это позволяет вернуть предыдущую конфигурацию.
+
+---
+
+# 9. Rollback
+
+В меню есть:
+
+```text
+10) Восстановить последний backup
+```
+
+Скрипт находит последний backup и восстанавливает сохранённые файлы.
+
+После восстановления перезапускаются соответствующие системные сервисы.
+
+---
+
+# 10. Проверка Remnawave
+
+Скрипт не изменяет Node автоматически.
+
+Он обнаруживает Docker-контейнеры и пытается найти:
+
+```text
+remnawave
+remnanode
+node
+```
+
+Выводится:
+
+```text
+container name
+image
+status
+```
+
+Например:
+
+```text
+[Node candidate] remnanode
+  image : remnawave/node:3.4.1
+  state : Up ...
+  version: Node 3.4.1 detected
+```
+
+Официальная документация Remnawave также рекомендует использовать контейнер `remnanode` и Docker Compose для запуска Node.
+
+---
+
+# Меню
+
+После запуска отображается:
+
+```text
+============================================================
+ Remnawave Server Protect
+ Panel 3.4.x | Node 3.4.1 | Xray 26.7.28
+============================================================
+
+  1) SYSCTL baseline
+  2) nftables (без TTL/SYN-limit)
+  3) File descriptor limits
+  4) DNS-over-HTTPS (local cloudflared)
+  5) Fail2ban SSH
+  6) Проверить DNS
+  7) Проверить Remnawave/Docker
+  8) Установить всё рекомендуемое
+  9) Статус
+ 10) Восстановить последний backup
+```
+
+Для обычной установки достаточно:
+
+```text
+8
+```
+
+---
+
+# Установка
+
+Скачать скрипт:
+
+```bash
+wget https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/remnawave-server-protect.sh
+```
+
+Сделать исполняемым:
+
+```bash
+chmod +x remnawave-server-protect.sh
+```
+
+Запустить:
+
+```bash
+sudo ./remnawave-server-protect.sh
+```
+
+И выбрать:
+
+```text
+8) Установить всё рекомендуемое
+```
+
+---
+
+# После установки
+
+Проверить DNS:
+
+```bash
+resolvectl status
+```
+
+Проверить локальный DoH proxy:
+
+```bash
+dig example.com @127.0.0.1 -p 5053
+```
+
+Проверить cloudflared:
+
+```bash
+systemctl status cloudflared-dns
+```
+
+Логи:
+
+```bash
+journalctl -u cloudflared-dns -n 100 --no-pager
+```
+
+Проверить nftables:
+
+```bash
+nft list table inet remnawave_protect
+```
+
+Проверить Fail2ban:
+
+```bash
+fail2ban-client status sshd
+```
+
+Проверить Docker:
+
+```bash
+docker ps
+```
+
+Проверить Node:
+
+```bash
+docker logs --tail 100 remnanode
+```
+
+Для просмотра Xray Core logs Remnawave предоставляет команду:
+
+```bash
+docker exec remnanode xlogs
+```
+
+---
+
+# Важное замечание по Node Port
+
+`NODE_PORT` / `APP_PORT` Node не должен быть открыт для всего интернета.
+
+Официальная документация Remnawave рекомендует разрешать доступ к Node Port только с IP-адреса Panel.
+
+Например:
+
+```text
+Panel IP
+    │
+    └──── TCP:APP_PORT ────> Remnawave Node
+
+Internet
+    │
+    └──── TCP:APP_PORT ────> BLOCK
+```
+
+Настройка firewall для конкретного `APP_PORT` намеренно не выполняется автоматически, поскольку IP Panel и порт Node различаются на каждом сервере.
+
+---
+
+# Что скрипт НЕ делает
+
+Скрипт не:
+
+* изменяет Xray config;
+* создаёт VLESS пользователей;
+* изменяет Reality keys;
+* изменяет XHTTP;
+* изменяет CDN;
+* изменяет Nginx;
+* устанавливает или обновляет Remnawave Panel;
+* обновляет Remnawave Node;
+* заменяет Xray-core внутри Node;
+* изменяет Docker Compose;
+* меняет Docker network;
+* автоматически открывает Node Port;
+* устанавливает TTL spoofing;
+* блокирует TCP RST;
+* гарантирует обход DPI/блокировок.
+
+Это **серверный hardening + encrypted DNS**, а не DPI-bypass инструмент.
+
+---
+
+# Почему именно такой подход
+
+Remnawave Node отвечает за проксирование пользовательского трафика через Xray-core, поэтому вмешательство в Docker networking или автоматическое изменение конфигурации Node может привести к потере связи между Panel и Node.
+
+Поэтому скрипт разделяет уровни:
+
+```text
+┌──────────────────────────────────────┐
+│           Remnawave Panel            │
+└──────────────────────────────────────┘
+                    │
+                    │ Node API
+                    ▼
+┌──────────────────────────────────────┐
+│          Remnawave Node              │
+│                                      │
+│             Xray-core                │
+└──────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────┐
+│            Linux kernel              │
+│                                      │
+│ sysctl / nftables / TCP / DNS / F2B │
+└──────────────────────────────────────┘
+```
+
+Скрипт работает преимущественно на нижнем уровне и не пытается управлять Remnawave/Xray.
+
+---
+
+# Безопасность
+
+Перед использованием на production-сервере рекомендуется:
+
+1. Открыть вторую SSH-сессию.
+2. Создать резервную копию.
+3. Запустить скрипт.
+4. Проверить DNS.
+5. Проверить Docker.
+6. Проверить `remnanode`.
+7. Проверить связь Node с Panel.
+8. Только после этого закрывать старую SSH-сессию.
+
+Особенно внимательно проверяйте SSH после включения Fail2ban и изменения firewall.
+
+---
+
+# License
+
+MIT License
+
+Copyright (c) 2026
+
+Разрешается свободное использование, изменение и распространение проекта при сохранении текста лицензии.
