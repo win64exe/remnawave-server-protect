@@ -71,6 +71,15 @@ declare -A DOH_MAP=(
     ["76.76.10.0"]="https://freedns.controld.com/p0"
     ["94.140.14.14"]="https://dns.adguard-dns.com/dns-query"
     ["94.140.15.15"]="https://dns.adguard-dns.com/dns-query"
+    # Yandex DNS (basic)
+    ["77.88.8.8"]="https://common.dot.dns.yandex.net/dns-query"
+    ["77.88.8.1"]="https://common.dot.dns.yandex.net/dns-query"
+    # Yandex DNS (safe)
+    ["77.88.8.88"]="https://safe.dot.dns.yandex.net/dns-query"
+    ["77.88.8.2"]="https://safe.dot.dns.yandex.net/dns-query"
+    # Yandex DNS (family)
+    ["77.88.8.7"]="https://family.dot.dns.yandex.net/dns-query"
+    ["77.88.8.3"]="https://family.dot.dns.yandex.net/dns-query"
 )
 
 # Full list of DNS servers to benchmark
@@ -345,19 +354,28 @@ benchmark_dns() {
         done
     fi
 
+    # Ensure we always have two suggestions
+    if [[ -z "$sug1" ]]; then sug1="${top_ips[0]:-1.1.1.1}"; fi
+    if [[ -z "$sug2" ]]; then sug2="${top_ips[1]:-9.9.9.9}"; fi
+
     echo -e "${BOLD}Рекомендация (с учётом наличия DoH):${NC}"
     echo -e "  1) ${GREEN}${sug1}${NC}  →  ${DOH_MAP[$sug1]:-plain UDP only}"
     echo -e "  2) ${GREEN}${sug2}${NC}  →  ${DOH_MAP[$sug2]:-plain UDP only}"
     echo
 
-    # Interactive selection
-    local sel1 sel2
-    read -r -p "Выберите 1-й DNS (Enter = ${sug1}): " sel1
-    sel1="${sel1:-$sug1}"
-    read -r -p "Выберите 2-й DNS (Enter = ${sug2}): " sel2
-    sel2="${sel2:-$sug2}"
+    # Interactive selection (safe under set -e / non-tty)
+    local sel1="$sug1" sel2="$sug2"
+    if [[ -t 0 ]]; then
+        local input1 input2
+        read -r -p "Выберите 1-й DNS (Enter = ${sug1}): " input1 || true
+        [[ -n "${input1:-}" ]] && sel1="$input1"
+        read -r -p "Выберите 2-й DNS (Enter = ${sug2}): " input2 || true
+        [[ -n "${input2:-}" ]] && sel2="$input2"
+    else
+        info "stdin не интерактивный — беру рекомендацию автоматически."
+    fi
 
-    # Validate
+    # Validate against DNS_LIST
     local valid1=0 valid2=0
     for ip in "${DNS_LIST[@]}"; do
         [[ "$ip" == "$sel1" ]] && valid1=1
