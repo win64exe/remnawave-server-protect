@@ -465,12 +465,17 @@ load_doh_upstreams() {
 
 configure_doh() {
     title "LOCAL ENCRYPTED DNS"
-    # Stop old cloudflared service if present (migration)
-    if systemctl list-unit-files cloudflared-dns.service &>/dev/null; then
+    # Stop/remove old cloudflared proxy-dns if present (removed upstream since 2026.2.0)
+    if systemctl list-unit-files 2>/dev/null | grep -q 'cloudflared-dns.service'; then
         systemctl disable --now cloudflared-dns.service 2>/dev/null || true
         rm -f /etc/systemd/system/cloudflared-dns.service
         systemctl daemon-reload 2>/dev/null || true
         warn "Старый cloudflared-dns отключён (proxy-dns удалён в 2026.2.0)."
+    fi
+    # Also stop any leftover cloudflared dns-proxy process
+    if pgrep -f 'cloudflared.*proxy-dns' >/dev/null 2>&1; then
+        pkill -f 'cloudflared.*proxy-dns' 2>/dev/null || true
+        warn "Остановлен процесс cloudflared proxy-dns."
     fi
 
     if ! command -v dnsproxy >/dev/null 2>&1; then
@@ -832,6 +837,25 @@ menu() {
     esac
 }
 
+run_rkn_protect() {
+    title "RKN PROTECT"
+    local url="https://github.com/win64exe/rkn_protect/raw/refs/heads/main/rkn_protect.sh"
+    local dest="/root/rkn_protect.sh"
+    info "Скачиваю rkn_protect.sh..."
+    if ! curl -fL --retry 3 --connect-timeout 15 "$url" -o "$dest"; then
+        warn "Не удалось скачать rkn_protect.sh — пропускаю."
+        return 0
+    fi
+    chmod +x "$dest"
+    info "Запускаю rkn_protect.sh (выбор 8)..."
+    # Feed menu choice 8 non-interactively
+    if echo "8" | bash "$dest"; then
+        info "rkn_protect.sh завершён."
+    else
+        warn "rkn_protect.sh завершился с ошибкой (код $?). Проверьте вручную: bash $dest"
+    fi
+}
+
 detect_os
 menu
 echo
@@ -848,3 +872,8 @@ echo "  docker ps"
 echo "  docker logs --tail 100 <remnawave-node-container>"
 echo "  nft list table inet remnawave_protect"
 echo
+
+# После успешной настройки DoH — запускаем rkn_protect
+if systemctl is-active --quiet dnsproxy.service 2>/dev/null; then
+    run_rkn_protect
+fi
