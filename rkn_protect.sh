@@ -229,26 +229,39 @@ EOF
     warn "После проверки конфигурации можно выполнить: systemctl restart docker"
 }
 
-install_cloudflared() {
-    title "DNS OVER HTTPS"
+install_dnsproxy() {
+    title "DNS OVER HTTPS (dnsproxy)"
     local arch
     arch="$(dpkg --print-architecture 2>/dev/null || true)"
-    local cf_arch=""
+    local dp_arch=""
     case "$arch" in
-        amd64) cf_arch="amd64" ;;
-        arm64) cf_arch="arm64" ;;
-        armhf) cf_arch="armhf" ;;
-        *) error "Неподдерживаемая архитектура для cloudflared: ${arch}" ;;
+        amd64) dp_arch="amd64" ;;
+        arm64) dp_arch="arm64" ;;
+        armhf|armv7l) dp_arch="armv7" ;;
+        *) error "Неподдерживаемая архитектура для dnsproxy: ${arch}" ;;
     esac
+
     local tmp
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
-    local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
-    info "Скачиваю cloudflared (${cf_arch})..."
-    curl -fL --retry 3 --connect-timeout 10 "$url" -o "$tmp/cloudflared"
-    install -m 0755 "$tmp/cloudflared" /usr/local/bin/cloudflared
-    /usr/local/bin/cloudflared --version || error "cloudflared не запускается."
-    info "cloudflared установлен."
+
+    # Fetch latest release tag and asset
+    local api_url="https://api.github.com/repos/AdguardTeam/dnsproxy/releases/latest"
+    local tag asset_url
+    tag="$(curl -fsSL --retry 3 --connect-timeout 10 "$api_url" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)"
+    [[ -n "$tag" ]] || error "Не удалось получить версию dnsproxy."
+    asset_url="https://github.com/AdguardTeam/dnsproxy/releases/download/${tag}/dnsproxy-linux-${dp_arch}-${tag}.tar.gz"
+
+    info "Скачиваю dnsproxy ${tag} (${dp_arch})..."
+    curl -fL --retry 3 --connect-timeout 15 "$asset_url" -o "$tmp/dnsproxy.tar.gz"
+    tar -xzf "$tmp/dnsproxy.tar.gz" -C "$tmp"
+    # Archive contains linux-*/dnsproxy
+    local bin
+    bin="$(find "$tmp" -type f -name dnsproxy | head -1)"
+    [[ -n "$bin" && -x "$bin" ]] || error "Бинарник dnsproxy не найден в архиве."
+    install -m 0755 "$bin" /usr/local/bin/dnsproxy
+    /usr/local/bin/dnsproxy --version || error "dnsproxy не запускается."
+    info "dnsproxy установлен."
 }
 
 # ----------------------------------------------------------------
@@ -419,7 +432,7 @@ benchmark_dns() {
 # Selected DNS IPs (for reference)
 PRIMARY_IP=${sel1}
 SECONDARY_IP=${sel2}
-# DoH upstreams for cloudflared
+# DoH upstreams for dnsproxy
 PRIMARY_DOH=${doh1}
 SECONDARY_DOH=${doh2}
 EOF
@@ -452,30 +465,42 @@ load_doh_upstreams() {
 
 configure_doh() {
     title "LOCAL ENCRYPTED DNS"
-    if ! command -v cloudflared >/dev/null 2>&1; then
-        install_cloudflared
+    # Stop old cloudflared service if present (migration)
+    if systemctl list-unit-files cloudflared-dns.service &>/dev/null; then
+        systemctl disable --now cloudflared-dns.service 2>/dev/null || true
+        rm -f /etc/systemd/system/cloudflared-dns.service
+        systemctl daemon-reload 2>/dev/null || true
+        warn "Старый cloudflared-dns отключён (proxy-dns удалён в 2026.2.0)."
+    fi
+
+    if ! command -v dnsproxy >/dev/null 2>&1; then
+        install_dnsproxy
     fi
 
     load_doh_upstreams
 
-    mkdir -p /etc/systemd/system/cloudflared-dns.service.d
     mkdir -p /etc/systemd/resolved.conf.d
 
     # Local listener only. No public DNS service is exposed.
-    cat > /etc/systemd/system/cloudflared-dns.service <<EOF
+    # dnsproxy: -l listen, -p port, -u upstream(s), --cache, -b bootstrap
+    cat > /etc/systemd/system/dnsproxy.service <<EOF
 [Unit]
-Description=Local DNS-over-HTTPS proxy for Remnawave server
+Description=Local DNS-over-HTTPS proxy (dnsproxy) for Remnawave server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/cloudflared proxy-dns \\
-    --address 127.0.0.1 \\
-    --port 5053 \\
-    --no-autoupdate \\
-    --upstream ${PRIMARY_DOH} \\
-    --upstream ${SECONDARY_DOH}
+ExecStart=/usr/local/bin/dnsproxy \\
+    -l 127.0.0.1 \\
+    -p 5053 \\
+    -u ${PRIMARY_DOH} \\
+    -u ${SECONDARY_DOH} \\
+    -b 1.1.1.1:53 \\
+    -b 8.8.8.8:53 \\
+    --cache \\
+    --cache-size 4096 \\
+    --ratelimit 0
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -507,10 +532,10 @@ EOF
     # Save current resolv.conf before replacing it.
     backup_file /etc/resolv.conf
     systemctl daemon-reload
-    systemctl enable --now cloudflared-dns.service
+    systemctl enable --now dnsproxy.service
     sleep 2
-    if ! systemctl is-active --quiet cloudflared-dns.service; then
-        error "cloudflared-dns.service не запустился. Проверьте: journalctl -u cloudflared-dns.service -n 100"
+    if ! systemctl is-active --quiet dnsproxy.service; then
+        error "dnsproxy.service не запустился. Проверьте: journalctl -u dnsproxy.service -n 100"
     fi
     systemctl restart systemd-resolved
     # Prefer the standard resolved stub.
@@ -520,12 +545,12 @@ EOF
     sleep 2
     info "Проверяю локальный DNS..."
     if ! dig +short +time=4 +tries=2 example.com @127.0.0.53 >/dev/null; then
-        warn "127.0.0.53 не ответил. Проверяю cloudflared напрямую..."
+        warn "127.0.0.53 не ответил. Проверяю dnsproxy напрямую..."
         if ! dig +short +time=4 +tries=2 example.com @127.0.0.1 -p 5053 >/dev/null; then
             error "Локальный DoH DNS не отвечает."
         fi
     fi
-    info "Encrypted DNS работает."
+    info "Encrypted DNS работает (dnsproxy)."
     info "Upstreams: ${PRIMARY_DOH} + ${SECONDARY_DOH}"
     warn "Plain UDP/53 к публичным DNS больше не используется системой."
 }
@@ -663,9 +688,9 @@ install_service() {
     cat > /etc/systemd/system/remnawave-server-protect.service <<'EOF'
 [Unit]
 Description=Remnawave server network baseline
-After=network-online.target nftables.service cloudflared-dns.service
+After=network-online.target nftables.service dnsproxy.service
 Wants=network-online.target
-Requires=cloudflared-dns.service
+Requires=dnsproxy.service
 [Service]
 Type=oneshot
 ExecStart=/bin/bash -c 'sysctl --system >/dev/null && nft delete table inet remnawave_protect 2>/dev/null || true; nft -f /etc/nftables.d/remnawave-protect.nft'
@@ -684,8 +709,8 @@ show_status() {
     title "STATUS"
     echo
     echo "=== Versions ==="
-    if command -v cloudflared >/dev/null 2>&1; then
-        cloudflared --version || true
+    if command -v dnsproxy >/dev/null 2>&1; then
+        dnsproxy --version || true
     fi
     echo
     echo "=== DNS ==="
@@ -697,7 +722,7 @@ show_status() {
         echo
     fi
     echo "=== Services ==="
-    systemctl is-active cloudflared-dns.service || true
+    systemctl is-active dnsproxy.service || true
     systemctl is-active systemd-resolved || true
     systemctl is-active fail2ban || true
     echo
@@ -763,7 +788,7 @@ menu() {
     echo "  1) SYSCTL baseline"
     echo "  2) nftables (без TTL/SYN-limit)"
     echo "  3) File descriptor limits"
-    echo "  4) DNS-over-HTTPS (local cloudflared)"
+    echo "  4) DNS-over-HTTPS (local dnsproxy)"
     echo "  5) Fail2ban SSH"
     echo "  6) Проверить DNS"
     echo "  7) Проверить Remnawave/Docker"
@@ -814,8 +839,8 @@ info "Готово."
 echo "Backup: ${BACKUP_DIR}"
 echo
 echo "Полезные команды:"
-echo "  systemctl status cloudflared-dns"
-echo "  journalctl -u cloudflared-dns -n 100 --no-pager"
+echo "  systemctl status dnsproxy"
+echo "  journalctl -u dnsproxy -n 100 --no-pager"
 echo "  resolvectl status"
 echo "  dig example.com @127.0.0.1 -p 5053"
 echo "  cat $DOH_CONFIG"
