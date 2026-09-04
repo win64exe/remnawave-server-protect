@@ -428,7 +428,7 @@ status
 Скачать скрипт:
 
 ```bash
-wget -O remnawave-server-protect.sh https://github.com/win64exe/rkn_protect/raw/refs/heads/main/remnawave-server-protect.sh && chmod +x remnawave-server-protect.sh && echo "8" | sudo ./remnawave-server-protect.sh
+wget -O remnawave-server-protect.sh https://github.com/win64exe/rkn_protect/raw/refs/heads/main/remnawave-server-protect.sh && chmod +x remnawave-server-protect.sh && sudo ./remnawave-server-protect.sh
 ```
 
 И выбрать:
