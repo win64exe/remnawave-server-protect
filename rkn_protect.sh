@@ -848,12 +848,18 @@ run_rkn_protect() {
     fi
     chmod +x "$dest"
     info "Запускаю rkn_protect.sh (выбор 8)..."
-    # Feed menu choice 8 non-interactively
-    if echo "8" | bash "$dest"; then
+    # Не даём ошибке rkn_protect ронять наш скрипт (у него set -u и свои баги)
+    set +e
+    echo "8" | bash "$dest"
+    local rc=$?
+    set -e
+    if (( rc == 0 )); then
         info "rkn_protect.sh завершён."
     else
-        warn "rkn_protect.sh завершился с ошибкой (код $?). Проверьте вручную: bash $dest"
+        warn "rkn_protect.sh завершился с ошибкой (код ${rc})."
+        warn "DNS/DoH уже настроены. rkn_protect вручную: bash ${dest}"
     fi
+    return 0
 }
 
 detect_os
