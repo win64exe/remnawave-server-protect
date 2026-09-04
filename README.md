@@ -412,6 +412,7 @@ status
   8) Установить всё рекомендуемое
   9) Статус
  10) Восстановить последний backup
+ 11) Бенчмарк DNS + выбор 2 лучших
 ```
 
 Для обычной установки достаточно:
@@ -427,7 +428,7 @@ status
 Скачать скрипт:
 
 ```bash
-wget -O rkn_protect.sh https://github.com/win64exe/rkn_protect/raw/refs/heads/main/rkn_protect.sh && chmod +x rkn_protect.sh && echo "8" | sudo ./rkn_protect.sh
+wget -O remnawave-server-protect.sh https://github.com/win64exe/rkn_protect/raw/refs/heads/main/remnawave-server-protect.sh && chmod +x remnawave-server-protect.sh && echo "8" | sudo ./remnawave-server-protect.sh
 ```
 
 И выбрать:
