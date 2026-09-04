@@ -668,24 +668,26 @@ detect_remnawave() {
     docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' || true
     echo
     local found=0
-    while read -r name image status; do
+    # Global IFS is $'\n\t' (no space) — use local IFS and '|' delimiter
+    local name image status
+    while IFS='|' read -r name image status; do
         [[ -n "$name" ]] || continue
         if [[ "$name" =~ remnawave|remnanode|node ]]; then
             found=1
             echo -e "${GREEN}[Node candidate]${NC} ${name}"
             echo "  image : ${image}"
             echo "  state : ${status}"
-            if [[ "$image" == *remnawave*node* ]]; then
+            if [[ "$image" == *remnawave*node* || "$image" == *remnawave/node* ]]; then
                 if [[ "$image" == *3.4.1* ]]; then
                     echo -e "  version: ${GREEN}Node 3.4.1 detected${NC}"
                 else
-                    echo -e "  version: ${YELLOW}check image tag${NC}"
+                    echo -e "  version: ${YELLOW}check image tag (${image})${NC}"
                 fi
             fi
             echo
         fi
-    done < <(docker ps --format '{{.Names}} {{.Image}} {{.Status}}')
-    (( found == 1 )) || warn "Remnawave Node-контейнер автоматически не найден."
+    done < <(docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}')
+    (( found >= 1 )) || warn "Remnawave Node-контейнер автоматически не найден."
 }
 
 install_service() {
@@ -837,31 +839,6 @@ menu() {
     esac
 }
 
-run_rkn_protect() {
-    title "RKN PROTECT"
-    local url="https://github.com/win64exe/rkn_protect/raw/refs/heads/main/rkn_protect.sh"
-    local dest="/root/rkn_protect.sh"
-    info "Скачиваю rkn_protect.sh..."
-    if ! curl -fL --retry 3 --connect-timeout 15 "$url" -o "$dest"; then
-        warn "Не удалось скачать rkn_protect.sh — пропускаю."
-        return 0
-    fi
-    chmod +x "$dest"
-    info "Запускаю rkn_protect.sh (выбор 8)..."
-    # Не даём ошибке rkn_protect ронять наш скрипт (у него set -u и свои баги)
-    set +e
-    echo "8" | bash "$dest"
-    local rc=$?
-    set -e
-    if (( rc == 0 )); then
-        info "rkn_protect.sh завершён."
-    else
-        warn "rkn_protect.sh завершился с ошибкой (код ${rc})."
-        warn "DNS/DoH уже настроены. rkn_protect вручную: bash ${dest}"
-    fi
-    return 0
-}
-
 detect_os
 menu
 echo
@@ -871,15 +848,9 @@ echo
 echo "Полезные команды:"
 echo "  systemctl status dnsproxy"
 echo "  journalctl -u dnsproxy -n 100 --no-pager"
-echo "  resolvectl status"
 echo "  dig example.com @127.0.0.1"
 echo "  cat $DOH_CONFIG"
 echo "  docker ps"
 echo "  docker logs --tail 100 <remnawave-node-container>"
 echo "  nft list table inet remnawave_protect"
 echo
-
-# После успешной настройки DoH — запускаем rkn_protect
-if systemctl is-active --quiet dnsproxy.service 2>/dev/null; then
-    run_rkn_protect
-fi
