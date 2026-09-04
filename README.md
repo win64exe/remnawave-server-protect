@@ -450,19 +450,19 @@ resolvectl status
 Проверить локальный DoH proxy:
 
 ```bash
-dig example.com @127.0.0.1 -p 5053
+dig example.com @127.0.0.1
 ```
 
 Проверить cloudflared:
 
 ```bash
-systemctl status cloudflared-dns
+systemctl status dnsproxy
 ```
 
 Логи:
 
 ```bash
-journalctl -u cloudflared-dns -n 100 --no-pager
+journalctl -u dnsproxy -n 100 --no-pager
 ```
 
 Проверить nftables:
