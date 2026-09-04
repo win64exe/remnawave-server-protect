@@ -243,13 +243,12 @@ install_dnsproxy() {
 
     local tmp
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' RETURN
 
     # Fetch latest release tag and asset
     local api_url="https://api.github.com/repos/AdguardTeam/dnsproxy/releases/latest"
     local tag asset_url
     tag="$(curl -fsSL --retry 3 --connect-timeout 10 "$api_url" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)"
-    [[ -n "$tag" ]] || error "Не удалось получить версию dnsproxy."
+    [[ -n "$tag" ]] || { rm -rf "$tmp"; error "Не удалось получить версию dnsproxy."; }
     asset_url="https://github.com/AdguardTeam/dnsproxy/releases/download/${tag}/dnsproxy-linux-${dp_arch}-${tag}.tar.gz"
 
     info "Скачиваю dnsproxy ${tag} (${dp_arch})..."
@@ -258,8 +257,12 @@ install_dnsproxy() {
     # Archive contains linux-*/dnsproxy
     local bin
     bin="$(find "$tmp" -type f -name dnsproxy | head -1)"
-    [[ -n "$bin" && -x "$bin" ]] || error "Бинарник dnsproxy не найден в архиве."
+    if [[ -z "$bin" || ! -x "$bin" ]]; then
+        rm -rf "$tmp"
+        error "Бинарник dnsproxy не найден в архиве."
+    fi
     install -m 0755 "$bin" /usr/local/bin/dnsproxy
+    rm -rf "$tmp"
     /usr/local/bin/dnsproxy --version || error "dnsproxy не запускается."
     info "dnsproxy установлен."
 }
