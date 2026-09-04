@@ -14,8 +14,11 @@
 #   Docker networks, or application ports.
 #
 #   DNS is moved away from plain UDP/53 to a local DNS-over-HTTPS
-#   proxy (cloudflared) + systemd-resolved. This avoids relying on
-#   plain DNS queries to 8.8.8.8/1.1.1.1.
+#   proxy (AdGuard dnsproxy) + systemd-resolved. This avoids relying
+#   on plain DNS queries to 8.8.8.8/1.1.1.1.
+#
+#   Note: cloudflared proxy-dns was removed in 2026.2.0, so we use
+#   dnsproxy instead.
 #
 # Run as root:
 #   bash remnawave-server-protect.sh
