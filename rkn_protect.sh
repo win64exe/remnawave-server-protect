@@ -486,6 +486,12 @@ configure_doh() {
 
     mkdir -p /etc/systemd/resolved.conf.d
 
+    # Bootstrap: plain DNS IPs that work on this VPS (from benchmark).
+    # 1.1.1.1/8.8.8.8 often filtered → DoH hostnames would not resolve.
+    local boot1="${PRIMARY_IP:-77.88.8.8}"
+    local boot2="${SECONDARY_IP:-9.9.9.9}"
+    [[ "$boot1" == "$boot2" ]] && boot2="9.9.9.9"
+
     # Local listener only. No public DNS service is exposed.
     # dnsproxy: -l listen, -p port, -u upstream(s), --cache, -b bootstrap
     cat > /etc/systemd/system/dnsproxy.service <<EOF
@@ -501,8 +507,8 @@ ExecStart=/usr/local/bin/dnsproxy \\
     -p 5053 \\
     -u ${PRIMARY_DOH} \\
     -u ${SECONDARY_DOH} \\
-    -b 1.1.1.1:53 \\
-    -b 8.8.8.8:53 \\
+    -b ${boot1}:53 \\
+    -b ${boot2}:53 \\
     --cache \\
     --cache-size 4096 \\
     --ratelimit 0
@@ -520,6 +526,7 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
+    info "Bootstrap DNS: ${boot1}, ${boot2}"
 
     # systemd-resolved sends DNS to local DoH proxy.
     cat > /etc/systemd/resolved.conf.d/remnawave-doh.conf <<'EOF'
