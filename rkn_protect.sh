@@ -13,9 +13,9 @@
 #   This script does NOT modify Xray configs, Remnawave Node compose,
 #   Docker networks, or application ports.
 #
-#   DNS is moved away from plain UDP/53 to a local DNS-over-HTTPS
-#   proxy (AdGuard dnsproxy) + systemd-resolved. This avoids relying
-#   on plain DNS queries to 8.8.8.8/1.1.1.1.
+#   DNS is moved to a local DNS-over-HTTPS proxy (AdGuard dnsproxy)
+#   on 127.0.0.1:53. systemd-resolved is disabled; /etc/resolv.conf
+#   points to 127.0.0.1. Upstream DoH is chosen via DNS benchmark.
 #
 #   Note: cloudflared proxy-dns was removed in 2026.2.0, so we use
 #   dnsproxy instead.
@@ -472,10 +472,8 @@ configure_doh() {
         systemctl daemon-reload 2>/dev/null || true
         warn "Старый cloudflared-dns отключён (proxy-dns удалён в 2026.2.0)."
     fi
-    # Also stop any leftover cloudflared dns-proxy process
     if pgrep -f 'cloudflared.*proxy-dns' >/dev/null 2>&1; then
         pkill -f 'cloudflared.*proxy-dns' 2>/dev/null || true
-        warn "Остановлен процесс cloudflared proxy-dns."
     fi
 
     if ! command -v dnsproxy >/dev/null 2>&1; then
@@ -484,16 +482,20 @@ configure_doh() {
 
     load_doh_upstreams
 
-    mkdir -p /etc/systemd/resolved.conf.d
-
     # Bootstrap: plain DNS IPs that work on this VPS (from benchmark).
-    # 1.1.1.1/8.8.8.8 often filtered → DoH hostnames would not resolve.
     local boot1="${PRIMARY_IP:-77.88.8.8}"
     local boot2="${SECONDARY_IP:-9.9.9.9}"
     [[ "$boot1" == "$boot2" ]] && boot2="9.9.9.9"
 
-    # Local listener only. No public DNS service is exposed.
-    # dnsproxy: -l listen, -p port, -u upstream(s), --cache, -b bootstrap
+    # systemd-resolved stub (127.0.0.53) is unreliable with local non-standard ports.
+    # Use dnsproxy on 127.0.0.1:53 + static resolv.conf instead.
+    systemctl disable --now systemd-resolved 2>/dev/null || true
+    # Free port 53 if resolved still holds it
+    if ss -ulnp 2>/dev/null | grep -q ':53 '; then
+        systemctl stop systemd-resolved 2>/dev/null || true
+        sleep 1
+    fi
+
     cat > /etc/systemd/system/dnsproxy.service <<EOF
 [Unit]
 Description=Local DNS-over-HTTPS proxy (dnsproxy) for Remnawave server
@@ -504,7 +506,7 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/local/bin/dnsproxy \\
     -l 127.0.0.1 \\
-    -p 5053 \\
+    -p 53 \\
     -u ${PRIMARY_DOH} \\
     -u ${SECONDARY_DOH} \\
     -b ${boot1}:53 \\
@@ -518,60 +520,46 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/run
-CapabilityBoundingSet=
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
 EOF
     info "Bootstrap DNS: ${boot1}, ${boot2}"
+    info "dnsproxy listen: 127.0.0.1:53 (DoH upstreams)"
 
-    # systemd-resolved sends DNS to local DoH proxy.
-    cat > /etc/systemd/resolved.conf.d/remnawave-doh.conf <<'EOF'
-[Resolve]
-DNS=127.0.0.1#5053
-FallbackDNS=
-DNSOverTLS=no
-DNSSEC=no
-Domains=~.
-Cache=yes
-DNSStubListener=yes
-ReadEtcHosts=yes
-EOF
-
-    # Save current resolv.conf before replacing it.
     backup_file /etc/resolv.conf
+    # Static resolv.conf → local dnsproxy (not systemd-resolved stub)
+    rm -f /etc/resolv.conf
+    printf 'nameserver 127.0.0.1\noptions edns0\n' > /etc/resolv.conf
+
+    # Remove old resolved drop-in if present
+    rm -f /etc/systemd/resolved.conf.d/remnawave-doh.conf
+
     systemctl daemon-reload
     systemctl enable --now dnsproxy.service
     sleep 2
     if ! systemctl is-active --quiet dnsproxy.service; then
         error "dnsproxy.service не запустился. Проверьте: journalctl -u dnsproxy.service -n 100"
     fi
-    systemctl restart systemd-resolved
-    # Prefer the standard resolved stub.
-    if [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
-        ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-    fi
-    sleep 2
+
     info "Проверяю локальный DNS..."
-    if ! dig +short +time=4 +tries=2 example.com @127.0.0.53 >/dev/null; then
-        warn "127.0.0.53 не ответил. Проверяю dnsproxy напрямую..."
-        if ! dig +short +time=4 +tries=2 example.com @127.0.0.1 -p 5053 >/dev/null; then
-            error "Локальный DoH DNS не отвечает."
-        fi
+    if ! dig +short +time=4 +tries=2 example.com @127.0.0.1 >/dev/null; then
+        error "Локальный DoH DNS (127.0.0.1:53) не отвечает."
     fi
-    info "Encrypted DNS работает (dnsproxy)."
+    if ! getent ahosts example.com >/dev/null 2>&1; then
+        warn "getent не резолвит example.com — проверьте /etc/resolv.conf"
+    fi
+    info "Encrypted DNS работает (dnsproxy :53)."
     info "Upstreams: ${PRIMARY_DOH} + ${SECONDARY_DOH}"
-    warn "Plain UDP/53 к публичным DNS больше не используется системой."
+    warn "systemd-resolved отключён. Система использует 127.0.0.1 → DoH."
 }
 
 test_dns() {
     title "DNS TEST"
     echo
     echo "Plain UDP/53 (diagnostic only):"
-    for ip in 8.8.8.8 1.1.1.1 9.9.9.9; do
+    for ip in 8.8.8.8 1.1.1.1 9.9.9.9 77.88.8.8; do
         if timeout 3 dig +short +tries=1 +time=2 example.com "@${ip}" >/dev/null 2>&1; then
             echo -e "  ${ip}:53 UDP  ${GREEN}OK${NC}"
         else
@@ -579,18 +567,23 @@ test_dns() {
         fi
     done
     echo
-    echo "Local encrypted resolver:"
-    if dig +short +tries=2 +time=3 example.com @127.0.0.1 -p 5053 >/dev/null 2>&1; then
-        echo -e "  127.0.0.1:5053 DoH  ${GREEN}OK${NC}"
+    echo "Local encrypted resolver (dnsproxy):"
+    if dig +short +tries=2 +time=3 example.com @127.0.0.1 >/dev/null 2>&1; then
+        echo -e "  127.0.0.1:53 DoH  ${GREEN}OK${NC}"
     else
-        echo -e "  127.0.0.1:5053 DoH  ${RED}FAIL${NC}"
+        echo -e "  127.0.0.1:53 DoH  ${RED}FAIL${NC}"
         return 1
     fi
     if getent ahosts example.com >/dev/null 2>&1; then
-        echo -e "  system resolver      ${GREEN}OK${NC}"
+        echo -e "  system resolver    ${GREEN}OK${NC}"
     else
-        echo -e "  system resolver      ${RED}FAIL${NC}"
+        echo -e "  system resolver    ${RED}FAIL${NC}"
         return 1
+    fi
+    if systemctl is-active --quiet dnsproxy.service 2>/dev/null; then
+        echo -e "  dnsproxy service   ${GREEN}active${NC}"
+    else
+        echo -e "  dnsproxy service   ${RED}inactive${NC}"
     fi
     if [[ -f "$DOH_CONFIG" ]]; then
         echo
@@ -735,8 +728,8 @@ show_status() {
     fi
     echo "=== Services ==="
     systemctl is-active dnsproxy.service || true
-    systemctl is-active systemd-resolved || true
     systemctl is-active fail2ban || true
+    echo "resolv.conf: $(head -1 /etc/resolv.conf 2>/dev/null || echo '?')"
     echo
     echo "=== nftables ==="
     nft list table inet remnawave_protect 2>/dev/null || true
@@ -879,7 +872,7 @@ echo "Полезные команды:"
 echo "  systemctl status dnsproxy"
 echo "  journalctl -u dnsproxy -n 100 --no-pager"
 echo "  resolvectl status"
-echo "  dig example.com @127.0.0.1 -p 5053"
+echo "  dig example.com @127.0.0.1"
 echo "  cat $DOH_CONFIG"
 echo "  docker ps"
 echo "  docker logs --tail 100 <remnawave-node-container>"
