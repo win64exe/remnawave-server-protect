@@ -634,9 +634,18 @@ configure_fail2ban() {
         apt-get install -y fail2ban >/dev/null
     }
     mkdir -p /etc/fail2ban/jail.d
-    local ssh_port
-    ssh_port="$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')"
-    ssh_port="${ssh_port:-22}"
+    local ssh_port="" awk_rc=0
+    # Without pipefail: $? = awk status. Early awk exit no longer yields 141.
+    set +o pipefail
+    ssh_port="$(sshd -T 2>/dev/null | awk '/^port / { print $2; exit 0 } END { exit 1 }')"
+    awk_rc=$?
+    set -o pipefail
+    if (( awk_rc == 0 )) && [[ "$ssh_port" =~ ^[0-9]+$ ]]; then
+        info "SSH port для fail2ban: ${ssh_port}"
+    else
+        warn "Не удалось определить SSH port (awk rc=${awk_rc}), использую 22."
+        ssh_port=22
+    fi
     cat > /etc/fail2ban/jail.d/remnawave-sshd.local <<EOF
 [DEFAULT]
 bantime  = 1h
