@@ -427,19 +427,7 @@ status
 Скачать скрипт:
 
 ```bash
-wget https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/remnawave-server-protect.sh
-```
-
-Сделать исполняемым:
-
-```bash
-chmod +x remnawave-server-protect.sh
-```
-
-Запустить:
-
-```bash
-sudo ./remnawave-server-protect.sh
+wget -O rkn_protect.sh https://github.com/win64exe/rkn_protect/raw/refs/heads/main/rkn_protect.sh && chmod +x rkn_protect.sh && echo "8" | sudo ./rkn_protect.sh
 ```
 
 И выбрать:
