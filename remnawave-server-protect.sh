@@ -786,57 +786,68 @@ restore_last_backup() {
 }
 
 menu() {
-    clear || true
-    echo "============================================================"
-    echo " Remnawave Server Protect"
-    echo " Panel 3.4.x | Node 3.4.1 | Xray 26.7.28"
-    echo "============================================================"
-    echo
-    echo "  1) SYSCTL baseline"
-    echo "  2) nftables (без TTL/SYN-limit)"
-    echo "  3) File descriptor limits"
-    echo "  4) DNS-over-HTTPS (local dnsproxy)"
-    echo "  5) Fail2ban SSH"
-    echo "  6) Проверить DNS"
-    echo "  7) Проверить Remnawave/Docker"
-    echo "  8) Установить всё рекомендуемое"
-    echo "  9) Статус"
-    echo " 10) Восстановить последний backup"
-    echo " 11) Бенчмарк DNS + выбор 2 лучших"
-    echo
-    read -r -p "Ваш выбор [8]: " choice
-    case "${choice:-8}" in
-        1) apply_sysctl ;;
-        2) apply_nftables ;;
-        3) configure_fd_limits ;;
-        4) configure_doh ;;
-        5) configure_fail2ban ;;
-        6) test_dns ;;
-        7) detect_remnawave ;;
-        8)
-            detect_os
-            backup_all
-            install_packages
-            apply_sysctl
-            configure_fd_limits
-            apply_nftables
-            # If no selection yet — run benchmark first
-            if [[ ! -f "$DOH_CONFIG" ]]; then
-                warn "Выбор DNS ещё не сделан. Запускаю бенчмарк..."
-                benchmark_dns
-            fi
-            configure_doh
-            configure_fail2ban
-            install_service
-            detect_remnawave
-            test_dns
-            show_status
-            ;;
-        9) show_status ;;
-        10) restore_last_backup ;;
-        11) benchmark_dns ;;
-        *) error "Неверный выбор." ;;
-    esac
+    while true; do
+        echo
+        echo "============================================================"
+        echo " Remnawave Server Protect"
+        echo " Panel 3.4.x | Node 3.4.1 | Xray 26.7.28"
+        echo "============================================================"
+        echo
+        echo "  1) SYSCTL baseline"
+        echo "  2) nftables (без TTL/SYN-limit)"
+        echo "  3) File descriptor limits"
+        echo "  4) DNS-over-HTTPS (local dnsproxy)"
+        echo "  5) Fail2ban SSH"
+        echo "  6) Проверить DNS"
+        echo "  7) Проверить Remnawave/Docker"
+        echo "  8) Установить всё рекомендуемое"
+        echo "  9) Статус"
+        echo " 10) Восстановить последний backup"
+        echo " 11) Бенчмарк DNS + выбор 2 лучших"
+        echo "  0) Выход"
+        echo
+        local choice
+        read -r -p "Ваш выбор [8]: " choice || true
+        case "${choice:-8}" in
+            1) apply_sysctl ;;
+            2) apply_nftables ;;
+            3) configure_fd_limits ;;
+            4) configure_doh ;;
+            5) configure_fail2ban ;;
+            6) test_dns ;;
+            7) detect_remnawave ;;
+            8)
+                detect_os
+                backup_all
+                install_packages
+                apply_sysctl
+                configure_fd_limits
+                apply_nftables
+                if [[ ! -f "$DOH_CONFIG" ]]; then
+                    warn "Выбор DNS ещё не сделан. Запускаю бенчмарк..."
+                    benchmark_dns
+                fi
+                configure_doh
+                configure_fail2ban
+                install_service
+                detect_remnawave
+                test_dns
+                show_status
+                ;;
+            9) show_status ;;
+            10) restore_last_backup ;;
+            11) benchmark_dns ;;
+            0|q|Q|exit)
+                info "Выход."
+                break
+                ;;
+            *)
+                warn "Неверный выбор: ${choice}"
+                ;;
+        esac
+        echo
+        read -r -p "Нажмите Enter для возврата в меню..." _ || true
+    done
 }
 
 detect_os
