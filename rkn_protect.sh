@@ -264,17 +264,17 @@ benchmark_dns() {
     printf "%-18s %8s %8s %8s %8s\n" "------------------" "--------" "--------" "--------" "--------"
 
     for ip in "${DNS_LIST[@]}"; do
-        ((i++))
+        i=$((i + 1))
         local times=()
         local success=0
         local t
         for ((t=1; t<=tries; t++)); do
             local qtime
             qtime=$(timeout $((timeout_sec + 1)) dig +time=${timeout_sec} +tries=1 +stats "${domain}" @"${ip}" 2>/dev/null \
-                | awk '/Query time:/ {print $4}')
+                | awk '/Query time:/ {print $4}' || true)
             if [[ -n "$qtime" && "$qtime" =~ ^[0-9]+$ ]]; then
                 times+=("$qtime")
-                ((success++))
+                success=$((success + 1))
             fi
         done
 
@@ -282,8 +282,8 @@ benchmark_dns() {
             local sum=0 min=${times[0]} max=${times[0]}
             for t in "${times[@]}"; do
                 sum=$((sum + t))
-                (( t < min )) && min=$t
-                (( t > max )) && max=$t
+                if (( t < min )); then min=$t; fi
+                if (( t > max )); then max=$t; fi
             done
             local avg=$((sum / success))
             printf "%-18s %8s %8s %8s %8s\n" "$ip" "$avg" "${success}/${tries}" "$min" "$max"
@@ -300,8 +300,8 @@ benchmark_dns() {
     fi
 
     # Sort by avg ascending, then by success descending
-    IFS=$'\n' sorted=($(printf '%s\n' "${results[@]}" | sort -t'|' -k1,1n -k2,2nr))
-    unset IFS
+    local sorted
+    mapfile -t sorted < <(printf '%s\n' "${results[@]}" | sort -t'|' -k1,1n -k2,2nr)
 
     echo -e "${BOLD}=== ТОП по latency ===${NC}"
     printf "%-4s %-18s %8s %8s %8s %8s  %s\n" "#" "IP" "avg_ms" "ok" "min" "max" "DoH"
@@ -310,13 +310,13 @@ benchmark_dns() {
     local rank=0
     local top_ips=()
     for line in "${sorted[@]}"; do
-        ((rank++))
+        rank=$((rank + 1))
         IFS='|' read -r avg success min max ip <<< "$line"
         local doh_mark="-"
         [[ -n "${DOH_MAP[$ip]:-}" ]] && doh_mark="${GREEN}yes${NC}"
         printf "%-4s %-18s %8s %8s %8s %8s  %b\n" "$rank" "$ip" "$avg" "${success}/${tries}" "$min" "$max" "$doh_mark"
         top_ips+=("$ip")
-        (( rank >= 10 )) && break
+        if (( rank >= 10 )); then break; fi
     done
 
     echo
